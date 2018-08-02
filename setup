@@ -1,0 +1,14 @@
+#!/bin/bash
+
+if [ ! -f "acmephp.phar" ]; then
+    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta4/acmephp.phar', 'acmephp.phar');"
+    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta4/acmephp.phar.pubkey', 'acmephp.phar.pubkey');"
+fi
+
+if [ ! -f "composer.phar" ] ; then
+    curl -sS https://getcomposer.org/installer | php
+else
+    php composer.phar selfupdate
+fi
+
+php composer.phar update
