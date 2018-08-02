@@ -1,0 +1,218 @@
+#!/usr/bin/php
+<?php
+
+define('WEBFACTION_API_VERSION', 2);
+define('WEBFACTION_ACME_APPLICATION', 'webfaction_acme');
+define('WEBFACTION_ACME_WEBSITE', 'webfaction_acme');
+
+if (!file_exists('config.php')) {
+    die("Configuration file is missing, stopping.\n");
+}
+
+require_once('vendor/autoload.php');
+
+use FortyTwoStudio\WebFactionPHP\WebFactionClient;
+use FortyTwoStudio\WebFactionPHP\WebFactionException;
+
+$config = include('config.php');
+
+$certificateConfig = $config['certificate'];
+$webfactionConfig = $config['webfaction'];
+$machineConfig = $config['machine'];
+
+$webfaction = new WebFactionClient(
+    $webfactionConfig['username'],
+    $webfactionConfig['password'],
+    $machineConfig['name'],
+    WEBFACTION_API_VERSION
+);
+
+$ips = array_values(array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
+    return $ip['machine'] == $machineConfig['name'] && !empty($ip['is_main']);
+}));
+
+if (empty($ips)) {
+    die("Primary machine's IP cannot be determined, stopping.\n");
+}
+
+$ip = $ips[0]['ip'];
+
+printf("Checking if gateway application '%s' exists... ", WEBFACTION_ACME_APPLICATION);
+
+$applications = array_values(array_filter($webfaction->listApps(), function($application) {
+    return $application['name'] == WEBFACTION_ACME_APPLICATION;
+}));
+
+if (empty($applications)) {
+    $application = $webfaction->createApp(WEBFACTION_ACME_APPLICATION, 'static_php70');
+    printf("created.\n");
+} else {
+    printf("found, going on.\n");
+}
+
+printf("Checking if gateway website '%s' exists... ", WEBFACTION_ACME_WEBSITE);
+
+$allWebsites = $webfaction->listWebsites();
+
+$websites = array_values(array_filter($allWebsites, function($website) use($ip) {
+    return $website['ip'] == $ip && $website['name'] == WEBFACTION_ACME_WEBSITE;
+}));
+
+if (empty($websites)) {
+    $website = $webfaction->createWebsite(WEBFACTION_ACME_WEBSITE, $ip, false, [], '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
+    printf("created.\n");
+} else {
+    printf("found, going on.\n");
+}
+
+$allDomains = [];
+
+foreach ($config['sites'] as $siteName => $siteConfig) {
+    $allDomains[] = $siteConfig['domain'];
+    
+    if (!empty($siteConfig['aliases'])) {
+        $allDomains = array_merge($allDomains, $siteConfig['aliases']);
+    }
+}
+
+$conflicts = [];
+
+foreach (array_values(array_filter($allWebsites, function($website) use($ip) {
+    return $website['ip'] != $ip && empty($website['https']);
+})) as $website) {
+    $conflicts = array_merge($conflicts, array_intersect($allDomains, $website['subdomains']));
+}
+
+if (!empty($conflicts)) {
+    die(sprintf("Some domains (%s) seem to be already associated to websites, aborting.\n", implode(', ', $conflicts)));
+}
+
+ob_start();
+
+printf("<IfModule mod_rewrite.c>\n");
+printf("    RewriteEngine On\n");
+printf("    # Allow requests for ACME tokens/challenges\n");
+printf("    RewriteRule ^.well-known/acme-challenge - [L,NC]\n");
+
+foreach ($config['sites'] as $siteName => $siteConfig) {
+    if (!empty($siteConfig['aliases'])) {
+        foreach ($siteConfig['aliases'] as $alias) {
+            printf("    # Map 'http://%s' -> 'https://%s'\n", $alias, $siteConfig['domain']);
+            printf("    RewriteCond %%{HTTP_HOST} ^%s$\n", str_replace('.', '\\.', $alias));
+            printf("    RewriteRule (.*) https://%s/$1 [R=301,L]\n", $siteConfig['domain']);
+        }
+    }
+}
+
+printf("    # Map domains to their secure counterpart\n", $alias, $siteConfig['domain']);
+printf("    RewriteCond %%{HTTP:X-Forwarded-SSL} !on\n");
+printf("    RewriteRule ^(.*)$ https://%%{HTTP_HOST}%%{REQUEST_URI} [R=301,L]\n");
+printf("</IfModule>");
+
+$htaccessPath = tempnam(sys_get_temp_dir(), 'htaccess');
+
+file_put_contents($htaccessPath, ob_get_clean());
+
+printf("Update website settings... ");
+
+$website = $webfaction->updateWebsite(WEBFACTION_ACME_APPLICATION, $ip, false, $allDomains, '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
+
+printf("%d domains configured.\n", count($allDomains));
+
+$allCertificates = $webfaction->listCertificates();
+
+$ftpConnection = ftp_connect($ip);
+
+$ftpLogin = ftp_login($ftpConnection, $machineConfig['username'], $machineConfig['password']);
+
+if (!$ftpConnection || !$ftpLogin) {
+    die("FTP connection attempt failed, aborting.\n");
+}
+
+$htaccessUpload = ftp_put($ftpConnection, sprintf('~/webapps/%s/.htaccess', WEBFACTION_ACME_APPLICATION), $htaccessPath, FTP_ASCII);
+
+if (!$htaccessUpload) {
+    die("FTP upload of .htaccess file failed, aborting.\n");
+}
+
+@unlink($htaccessPath);
+
+if (!@ftp_chdir($ftpConnection, sprintf('~/webapps/%s/.well-known', WEBFACTION_ACME_APPLICATION))) {
+    ftp_mkdir($ftpConnection, sprintf('~/webapps/%s/.well-known', WEBFACTION_ACME_APPLICATION));
+}
+
+if (!@ftp_chdir($ftpConnection, sprintf('~/webapps/%s/.well-known/acme-challenge', WEBFACTION_ACME_APPLICATION))) {
+    ftp_mkdir($ftpConnection, sprintf('~/webapps/%s/.well-known/acme-challenge', WEBFACTION_ACME_APPLICATION));
+}
+
+foreach ($config['sites'] as $name => $siteConfig) {
+    printf("Processing site '%s'...\n", $siteName);
+    
+    $domains = [ $siteConfig['domain'] ];
+    if (!empty($siteConfig['aliases'])) {
+        $domains = array_merge($domains, $siteConfig['aliases']);
+    }
+    
+    foreach ($domains as $domain) {
+        printf("  > Preparing domain '%s'... \n", $domain);
+        
+        $certificatePath = sprintf('%s/.acmephp/master/certs/%s/cert.pem', $_SERVER['HOME'], $domain);
+        
+        if (!file_exists($certificatePath)) {
+            $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
+
+            if (!file_exists($authorizationPath)) {
+                shell_exec(sprintf('php %s/acmephp.phar authorize %s --quiet --no-interaction', __DIR__, $domain));
+            }
+
+            $authorization = json_decode(file_get_contents($authorizationPath));
+
+            if (ftp_size($ftpConnection, sprintf('~/webapps/%s/.well-known/acme-challenge/%s', WEBFACTION_ACME_APPLICATION, $authorization->token)) < 0) {
+                $tokenPath = tempnam(sys_get_temp_dir(), 'acme-challenge');
+
+                file_put_contents($tokenPath, $authorization->payload);
+
+                $tokenUpload = ftp_put($ftpConnection, sprintf('~/webapps/%s/.well-known/acme-challenge/%s', WEBFACTION_ACME_APPLICATION, $authorization->token), $tokenPath, FTP_ASCII);
+                if (!$tokenUpload) {
+                    die("FTP upload of challenge/token file failed, aborting.\n");
+                }
+
+                @unlink($tokenPath);
+            }
+
+            shell_exec(sprintf('php %s/acmephp.phar check %s --quiet --no-interaction', __DIR__, $domain));
+        }
+        
+        printf("  > Domain '%s' authorised.\n", $domain);
+    }
+    
+    shell_exec(sprintf('php %s/acmephp.phar request --quiet --no-interaction --organization "%s" --email "%s" --locality "%s" --province "%s" --country "%s" %s %s', __DIR__,
+        $certificateConfig['organization'],
+        $certificateConfig['email'],
+        $certificateConfig['locality'],
+        $certificateConfig['province'],
+        $certificateConfig['country'],
+        $siteConfig['domain'],
+        implode(' ', array_map(function($alias) {
+            return sprintf('-a %s', $alias);
+        }, !empty($siteConfig['aliases']) ? $siteConfig['aliases'] : []))
+    ));
+    
+    $keyPem = file_get_contents(sprintf('%s/.acmephp/master/private/%s/private.pem', $_SERVER['HOME'], $siteConfig['domain']));
+    $certificatePem = file_get_contents(sprintf('%s/.acmephp/master/certs/%s/cert.pem', $_SERVER['HOME'], $siteConfig['domain']));
+    $intermediatePem = file_get_contents(sprintf('%s/.acmephp/master/certs/%s/fullchain.pem', $_SERVER['HOME'], $siteConfig['domain']));
+    
+    $certificates = array_values(array_filter($allCertificates, function($certificate) use($name) {
+        return $certificate['name'] == $name;
+    }));
+    
+    if (empty($certificates)) {
+        $webfaction->createCertificate($name, $certificatePem, $keyPem, $intermediatePem);
+    } else {
+        $webfaction->updateCertificate($name, $certificatePem, $keyPem, $intermediatePem);
+    }
+    
+    printf("  > Certificate created/updated.\n");
+}
+
+ftp_close($ftpConnection);
