@@ -8,7 +8,7 @@ define('WEBFACTION_DEPLOY_TIMEOUT_INTERVAL', 10);
 define('WEBFACTION_DEPLOY_TIMEOUT_MAXIMUM_ATTEMPTS', 90);
 define('WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD', 2);
 
-if (!file_exists('config.php')) {
+if (!file_exists(__DIR__.'/config.php')) {
     die("Configuration file is missing, stopping.\n");
 }
 
@@ -17,7 +17,7 @@ require_once('vendor/autoload.php');
 use FortyTwoStudio\WebFactionPHP\WebFactionClient;
 use FortyTwoStudio\WebFactionPHP\WebFactionException;
 
-$config = include('config.php');
+$config = include(__DIR__.'/config.php');
 
 $certificateConfig = $config['certificate'];
 $webfactionConfig = $config['webfaction'];
