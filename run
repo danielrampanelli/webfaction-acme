@@ -191,10 +191,6 @@ foreach ($config['sites'] as $name => $siteConfig) {
             $urlCheckAttempts = 0;
             
             do {
-                if ($urlCheckAttempts >= WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD) {
-                    printf(".");
-                }
-                
                 $url = sprintf('http://%s/.well-known/acme-challenge/%s', $domain, $authorization->token);
                 
                 $curl = curl_init($url);
@@ -211,6 +207,10 @@ foreach ($config['sites'] as $name => $siteConfig) {
                 }
 
                 curl_close($curl);
+                
+                if ($urlCheckAttempts >= WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD) {
+                    printf(".");
+                }
                 
                 if ($urlCheckAttempts >= WEBFACTION_DEPLOY_TIMEOUT_MAXIMUM_ATTEMPTS) {
                     printf("\n");
