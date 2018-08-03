@@ -1,14 +1,23 @@
 #!/bin/bash
 
 if [ ! -f "acmephp.phar" ]; then
-    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta4/acmephp.phar', 'acmephp.phar');"
-    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta4/acmephp.phar.pubkey', 'acmephp.phar.pubkey');"
+    echo "Downloading ACMEPHP..."
+    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta5/acmephp.phar', 'acmephp.phar');"
+    php -r "copy('https://github.com/acmephp/acmephp/releases/download/1.0.0-beta5/acmephp.phar.pubkey', 'acmephp.phar.pubkey');"
+else
+    echo "Updating ACMEPHP..."
+    php acmephp.phar self-update --quiet
 fi
 
 if [ ! -f "composer.phar" ] ; then
+    echo "Downloading Composer..."
     curl -sS https://getcomposer.org/installer | php
 else
+    echo "Updating Composer..."
     php composer.phar selfupdate
 fi
 
+echo "Installing Composer dependencies..."
 php composer.phar update
+
+echo "All done!"
