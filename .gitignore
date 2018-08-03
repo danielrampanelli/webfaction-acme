@@ -1,4 +1,4 @@
-acmephp.phar*
+acmephp*.phar*
 composer.lock
 composer.phar
 config.php
