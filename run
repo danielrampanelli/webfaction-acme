@@ -4,6 +4,9 @@
 define('WEBFACTION_API_VERSION', 2);
 define('WEBFACTION_ACME_APPLICATION', 'webfaction_acme');
 define('WEBFACTION_ACME_WEBSITE', 'webfaction_acme');
+define('WEBFACTION_DEPLOY_TIMEOUT_INTERVAL', 10);
+define('WEBFACTION_DEPLOY_TIMEOUT_MAXIMUM_ATTEMPTS', 90);
+define('WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD', 2);
 
 if (!file_exists('config.php')) {
     die("Configuration file is missing, stopping.\n");
@@ -180,6 +183,42 @@ foreach ($config['sites'] as $name => $siteConfig) {
                 @unlink($tokenPath);
             }
 
+            $urlCheckAttempts = 0;
+            
+            do {
+                if ($urlCheckAttempts >= WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD) {
+                    printf(".");
+                }
+                
+                $url = sprintf('http://%s/.well-known/acme-challenge/%s', $domain, $authorization->token);
+                
+                $curl = curl_init($url);
+                curl_setopt($curl, CURLOPT_NOBODY, TRUE);
+                curl_exec($curl);
+
+                $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+                if ($httpCode != 200) {
+                    if ($urlCheckAttempts == WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD) {
+                        printf("  > Waiting for challenge/token url (%s)...", $url);
+                    }
+                    
+                    sleep(WEBFACTION_DEPLOY_TIMEOUT_INTERVAL);
+                }
+
+                curl_close($curl);
+                
+                if ($urlCheckAttempts >= WEBFACTION_DEPLOY_TIMEOUT_MAXIMUM_ATTEMPTS) {
+                    printf("\n");
+                    die("  > Reached maximum number of attempts while waiting for url, aborting.\n");
+                }
+                
+                $urlCheckAttempts += 1;
+            } while($httpCode != 200);
+            
+            if ($urlCheckAttempts > WEBFACTION_DEPLOY_TIMEOUT_THRESHOLD) {
+                printf("\n");
+            }
+            
             shell_exec(sprintf('php %s/acmephp.phar check %s --quiet --no-interaction', __DIR__, $domain));
         }
         
