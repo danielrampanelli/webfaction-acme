@@ -1,5 +1,7 @@
 {
+    "minimum-stability": "dev",
     "require": {
-        "fortytwo-studio/webfaction-php": "^1.1"
+        "fortytwo-studio/webfaction-php": "^1.1",
+        "acmephp/core": "1.0.0-beta4"
     }
 }
