@@ -92,49 +92,60 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
         if (!empty($unknownDomains)) {
             throw new Exception(sprintf("Unknown domain(s) %s", implode(', ', $unknownDomains)));
         }
+        
+        $unverifiedDomains = [];
 
         foreach ($domainsToAuthorize as $domain) {
             printf("  > Processing domain '%s'... \n", $domain);
 
-            shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=dns', __DIR__, $domain));
+            try {
+                shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=dns', __DIR__, $domain));
 
-            $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
-            $authorization = json_decode(file_get_contents($authorizationPath));
+                $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
+                $authorization = json_decode(file_get_contents($authorizationPath));
 
-            $challenge = (new Base64SafeEncoder())->encode(hash('sha256', $authorization->payload, true));
-            $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
+                $challenge = (new Base64SafeEncoder())->encode(hash('sha256', $authorization->payload, true));
+                $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
 
-            if (!array_key_exists($challengeDomain, $configuredDomains)) {
-                $parent = $configuredDomains[$domain]['parent'];
+                if (!array_key_exists($challengeDomain, $configuredDomains)) {
+                    $parent = $configuredDomains[$domain]['parent'];
 
-                $path = ACME_DNS_VALIDATION_SUBDOMAIN;
-                if (!empty($configuredDomains[$domain]['path'])) {
-                    $path = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $configuredDomains[$domain]['path']);
+                    $path = ACME_DNS_VALIDATION_SUBDOMAIN;
+                    if (!empty($configuredDomains[$domain]['path'])) {
+                        $path = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $configuredDomains[$domain]['path']);
+                    }
+
+                    $webfaction->createDomain($parent, [$path]);
+
+                    $configuredDomains[$challengeDomain] = [
+                        'parent' => $parent,
+                        'path' => $path,
+                    ];
                 }
 
-                $webfaction->createDomain($parent, [$path]);
+                $webfaction->deleteDnsOverride($challengeDomain);
 
-                $configuredDomains[$challengeDomain] = [
-                    'parent' => $parent,
-                    'path' => $path,
-                ];
+                $webfaction->createDnsOverride($challengeDomain, '', '', '', '', $challenge);
+
+                $records = trim(shell_exec(sprintf('dig -t TXT %s +short', $challengeDomain)));
+
+                if (strpos($records, $challenge) === false) {
+                    throw new Exception("DNS records not yet propagated");
+                }
+
+                exec(sprintf('php %s/acmephp.phar check --solver=dns --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $domain), $output, $outcome);
+
+                if ($outcome !== 0) {
+                    throw new Exception("Authorization could not been completed");
+                }
+            } catch (Exception $e) {
+                printf("  > Issue detected: %s.\n", $e->getMessage());
+                $unverifiedDomains[] = $domain;
             }
+        }
 
-            $webfaction->deleteDnsOverride($challengeDomain);
-
-            $webfaction->createDnsOverride($challengeDomain, '', '', '', '', $challenge);
-
-            $records = trim(shell_exec(sprintf('dig -t TXT %s +short', $challengeDomain)));
-
-            if (strpos($records, $challenge) === false) {
-                throw new Exception("DNS records not yet propagated");
-            }
-
-            exec(sprintf('php %s/acmephp.phar check --solver=dns --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $domain), $output, $outcome);
-
-            if ($outcome !== 0) {
-                throw new Exception("Authorization could not been performed");
-            }
+        if (!empty($unverifiedDomains)) {
+            throw new Exception("Not all domains could be verified/authorized");
         }
 
         shell_exec(sprintf('php %s/acmephp.phar request --no-interaction --organization "%s" --email "%s" --locality "%s" --province "%s" --country "%s" %s %s', __DIR__,
