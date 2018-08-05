@@ -40,6 +40,11 @@ $webfaction = new WebFactionClient(
     WEBFACTION_API_VERSION
 );
 
+if (!file_exists(sprintf('%s/.acmephp/master/private/_account/private.pem', $_SERVER['HOME']))) {
+    printf("Setting up ACME account... \n");
+    shell_exec(sprintf('php %s/acmephp.phar register %s --quiet --no-interaction', __DIR__, $config['account']));
+}
+
 $configuredDomains = [];
 
 $allDomains = $webfaction->listDomains();
