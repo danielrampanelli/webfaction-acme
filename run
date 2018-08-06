@@ -190,7 +190,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
         printf("  > Certificate created/updated.\n");
 
         if (!empty($siteConfig['redirect'])) {
-            $redirects[$domain] = $siteConfig['domain'];
+            $redirects[$domain] = $siteConfig['redirect'];
         }
     } catch (\Exception $e) {
         printf("  > Skipping site due to error/issue caused by: %s.\n", $e->getMessage());
@@ -258,12 +258,14 @@ try {
         printf("  > Gateway website exists, going on... \n", WEBFACTION_ACME_APPLICATION);
     }
 
+    $redirectsWithDestinations = array_filter($redirects, function($redirect) { return is_string($redirect); });
+
     ob_start();
 
     printf("<IfModule mod_rewrite.c>\n");
     printf("    RewriteEngine On\n");
 
-    foreach ($redirects as $from => $to) {
+    foreach ($redirectsWithDestinations as $from => $to) {
         printf("    # Map 'http://%s' -> 'https://%s'\n", $from, $to);
         printf("    RewriteCond %%{HTTP_HOST} ^%s$\n", str_replace('.', '\\.', $from));
         printf("    RewriteRule (.*) https://%s/$1 [R=301,L]\n", $to);
@@ -277,8 +279,8 @@ try {
     $htaccessPath = tempnam(sys_get_temp_dir(), 'htaccess');
 
     file_put_contents($htaccessPath, ob_get_clean());
-
-    $domainsToRedirect = array_values(array_unique(array_merge(array_keys($redirects), array_values($redirects))));
+    
+    $domainsToRedirect = array_values(array_unique(array_merge(array_keys($redirects), array_values($redirectsWithDestinations))));
 
     printf("  > Update website settings for %d domains...\n", count($domainsToRedirect));
 
