@@ -75,25 +75,28 @@ $redirects = [];
 foreach ($config['sites'] as $siteName => $siteConfig) {
     printf("Processing site '%s'...\n", $siteName);
 
-    $domains = [ $siteConfig['domain'] ];
-    if (!empty($siteConfig['aliases'])) {
-        $domains = array_merge($domains, $siteConfig['aliases']);
+    if (empty($siteConfig['domains'])) {
+        throw new Exception("No domains configured");
     }
-    
+
+    if (empty($siteConfig['domain'])) {
+        $siteConfig['domain'] = $siteConfig['domains'][0];
+    }
+
     try {
-        $domainsToAuthorize = $domains;
+        $domainsToAuthorize = $siteConfig['domains'];
         if (!empty($certificates[$siteName])) {
             $domainsToAuthorize = array_diff($domains, $certificates[$siteName]);
         }
 
-        $unknownDomains = array_values(array_filter($domains, function($domain) use($configuredDomains) {
+        $unknownDomains = array_values(array_filter($siteConfig['domains'], function($domain) use($configuredDomains) {
             return !array_key_exists($domain, $configuredDomains);
         }));
 
         if (!empty($unknownDomains)) {
             throw new Exception(sprintf("Unknown domain(s) %s", implode(', ', $unknownDomains)));
         }
-        
+
         $unverifiedDomains = [];
 
         foreach ($domainsToAuthorize as $domain) {
@@ -158,7 +161,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
             $siteConfig['domain'],
             implode(' ', array_map(function($alias) {
                 return sprintf('-a %s', $alias);
-            }, !empty($siteConfig['aliases']) ? $siteConfig['aliases'] : []))
+            }, array_diff($siteConfig['domains'], [ $siteConfig['domain'] ])))
         ));
 
         $keyPem = file_get_contents(sprintf('%s/.acmephp/master/private/%s/private.pem', $_SERVER['HOME'], $siteConfig['domain']));
@@ -175,9 +178,9 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
             $webfaction->updateCertificate($siteName, $certificatePem, $keyPem, $intermediatePem);
         }
 
-        foreach ($domains as $domain) {
+        foreach ($siteConfig['domains'] as $domain) {
             $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
-            
+
             if (array_key_exists($challengeDomain, $configuredDomains)) {
                 printf("  > Removing authorization domain for '%s'...\n", $domain);
                 $webfaction->deleteDomain($configuredDomains[$domain]['parent'], [$configuredDomains[$domain]['path']]);
