@@ -49,8 +49,6 @@ $configuredDomains = [];
 
 $allDomains = $webfaction->listDomains();
 
-// print_r($allDomains); die;
-
 foreach ($allDomains as $domain) {
     $configuredDomains[$domain['domain']] = [
         'parent' => $domain['domain'],
@@ -64,8 +62,6 @@ foreach ($allDomains as $domain) {
         ];
     }
 }
-
-// print_r($configuredDomains); die;
 
 $certificates = [];
 
