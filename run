@@ -33,6 +33,11 @@ foreach (['username', 'password'] as $property) {
     }
 }
 
+if (!file_exists(sprintf('%s/.acmephp/master/private/_account/private.pem', $_SERVER['HOME']))) {
+    printf("Setting up ACME account... \n");
+    shell_exec(sprintf('php %s/acmephp.phar register %s --quiet --no-interaction', __DIR__, $config['account']));
+}
+
 $webfaction = new WebFactionClient(
     $webfactionConfig['username'],
     $webfactionConfig['password'],
@@ -40,9 +45,6 @@ $webfaction = new WebFactionClient(
     WEBFACTION_API_VERSION
 );
 
-if (!file_exists(sprintf('%s/.acmephp/master/private/_account/private.pem', $_SERVER['HOME']))) {
-    printf("Setting up ACME account... \n");
-    shell_exec(sprintf('php %s/acmephp.phar register %s --quiet --no-interaction', __DIR__, $config['account']));
 }
 
 $configuredDomains = [];
