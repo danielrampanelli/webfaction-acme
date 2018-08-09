@@ -2,6 +2,7 @@
 <?php
 
 define('ACME_DNS_VALIDATION_SUBDOMAIN', '_acme-challenge');
+define('ACME_HTTP_VALIDATION_PATH', '/.well-known/acme-challenge');
 define('WEBFACTION_API_VERSION', 2);
 define('WEBFACTION_ACME_APPLICATION', 'webfaction_acme');
 define('WEBFACTION_ACME_WEBSITE', 'webfaction_acme');
@@ -45,6 +46,52 @@ $webfaction = new WebFactionClient(
     WEBFACTION_API_VERSION
 );
 
+$allWebsites = $webfaction->listWebsites();
+
+printf("Setting up preconditions...\n");
+
+try {
+    $ips = array_values(array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
+        return $ip['machine'] == $machineConfig['name'] && !empty($ip['is_main']);
+    }));
+
+    if (empty($ips)) {
+        throw new Exception("Primary machine's IP cannot be determined");
+    }
+
+    $ip = $ips[0]['ip'];
+
+    $applications = array_values(array_filter($webfaction->listApps(), function($application) {
+        return $application['name'] == WEBFACTION_ACME_APPLICATION;
+    }));
+
+    if (empty($applications)) {
+        printf("  > Creating gateway application '%s'... \n", WEBFACTION_ACME_APPLICATION);
+        $application = $webfaction->createApp(WEBFACTION_ACME_APPLICATION, 'static_php70');
+    } else {
+        printf("  > Gateway application exists, going on... \n", WEBFACTION_ACME_APPLICATION);
+    }
+
+    $websites = array_values(array_filter($allWebsites, function($website) use($ip) {
+        return $website['ip'] == $ip && $website['name'] == WEBFACTION_ACME_WEBSITE;
+    }));
+
+    if (empty($websites)) {
+        printf("  > Creating gateway website '%s'... \n", WEBFACTION_ACME_APPLICATION);
+        $website = $webfaction->createWebsite(WEBFACTION_ACME_WEBSITE, $ip, false, [], '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
+    } else {
+        printf("  > Gateway website exists, going on... \n", WEBFACTION_ACME_APPLICATION);
+    }
+
+    $ftpConnection = ftp_connect($ip);
+
+    $ftpLogin = ftp_login($ftpConnection, $machineConfig['username'], $machineConfig['password']);
+
+    if (!$ftpConnection || !$ftpLogin) {
+        throw new Exception("FTP connection attempt to server failed");
+    }
+} catch (Exception $e) {
+    die(sprintf("  > Aborting due to error/issue caused by: %s.\n", $e->getMessage()));
 }
 
 $configuredDomains = [];
@@ -72,6 +119,9 @@ foreach ($allCertificates as $certificate) {
     $certificates[$certificate['name']] = explode(',', $certificate['domains']);
 }
 
+$pendingDomains = [];
+$confirmedDomains = [];
+$domainsToValidate = [];
 $redirects = [];
 
 foreach ($config['sites'] as $siteName => $siteConfig) {
@@ -88,7 +138,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
     try {
         $domainsToAuthorize = $siteConfig['domains'];
         if (!empty($certificates[$siteName])) {
-            $domainsToAuthorize = array_diff($domains, $certificates[$siteName]);
+            $domainsToAuthorize = array_diff($siteConfig['domains'], $certificates[$siteName]);
         }
 
         $unknownDomains = array_values(array_filter($siteConfig['domains'], function($domain) use($configuredDomains) {
@@ -105,41 +155,104 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
             printf("  > Processing domain '%s'... \n", $domain);
 
             try {
-                shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=dns', __DIR__, $domain));
+                if (empty($siteConfig['validation'])) {
+                    $siteConfig['validation'] = 'dns';
+                }
+
+                if (!in_array($siteConfig['validation'], ['dns', 'http'])) {
+                    throw new Exception('Unknown validation method');
+                }
+
+                shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=%s', __DIR__, $domain, $siteConfig['validation']));
 
                 $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
                 $authorization = json_decode(file_get_contents($authorizationPath));
 
-                $challenge = (new Base64SafeEncoder())->encode(hash('sha256', $authorization->payload, true));
-                $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
+                if ($siteConfig['validation'] === 'dns') {
+                    $challenge = (new Base64SafeEncoder())->encode(hash('sha256', $authorization->payload, true));
+                    $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
 
-                if (!array_key_exists($challengeDomain, $configuredDomains)) {
-                    $parent = $configuredDomains[$domain]['parent'];
+                    if (!array_key_exists($challengeDomain, $configuredDomains)) {
+                        $parent = $configuredDomains[$domain]['parent'];
 
-                    $path = ACME_DNS_VALIDATION_SUBDOMAIN;
-                    if (!empty($configuredDomains[$domain]['path'])) {
-                        $path = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $configuredDomains[$domain]['path']);
+                        $path = ACME_DNS_VALIDATION_SUBDOMAIN;
+                        if (!empty($configuredDomains[$domain]['path'])) {
+                            $path = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $configuredDomains[$domain]['path']);
+                        }
+
+                        $webfaction->createDomain($parent, [$path]);
+
+                        $configuredDomains[$challengeDomain] = [
+                            'parent' => $parent,
+                            'path' => $path,
+                        ];
                     }
 
-                    $webfaction->createDomain($parent, [$path]);
+                    $webfaction->deleteDnsOverride($challengeDomain);
 
-                    $configuredDomains[$challengeDomain] = [
-                        'parent' => $parent,
-                        'path' => $path,
-                    ];
+                    $webfaction->createDnsOverride($challengeDomain, '', '', '', '', $challenge);
+
+                    $records = trim(shell_exec(sprintf('dig -t TXT %s +short', $challengeDomain)));
+
+                    if (strpos($records, $challenge) === false) {
+                        throw new Exception("DNS records not yet propagated");
+                    }
                 }
 
-                $webfaction->deleteDnsOverride($challengeDomain);
+                if ($siteConfig['validation'] === 'http') {
+                    $tokenPath = tempnam(sys_get_temp_dir(), 'token');
 
-                $webfaction->createDnsOverride($challengeDomain, '', '', '', '', $challenge);
+                    file_put_contents($tokenPath, $authorization->payload);
 
-                $records = trim(shell_exec(sprintf('dig -t TXT %s +short', $challengeDomain)));
+                    $tokenUpload = ftp_put($ftpConnection, sprintf('~/webapps/%s/%s', WEBFACTION_ACME_APPLICATION, $authorization->token), $tokenPath, FTP_ASCII);
 
-                if (strpos($records, $challenge) === false) {
-                    throw new Exception("DNS records not yet propagated");
+                    if (!$tokenUpload) {
+                        throw new Exception(sprintf("FTP upload of validation token '%s' file failed", $authorization->token));
+                    }
+
+                    @unlink($tokenUpload);
+
+                    $matchingWebsites = array_values(array_filter($allWebsites, function($website) use($ip, $domain) {
+                        return $website['ip'] == $ip && empty($website['https']) && in_array($domain, $website['subdomains']) && $website['name'] != WEBFACTION_ACME_WEBSITE;
+                    }));
+
+                    if (!empty($matchingWebsites)) {
+                        $website = $matchingWebsites[0];
+
+                        $apps = array_filter($website['website_apps'], function($app) {
+                            return $app[0] == WEBFACTION_ACME_APPLICATION && $app[1] == ACME_HTTP_VALIDATION_PATH;
+                        });
+
+                        if (empty($apps)) {
+                            $params = [ $website['name'], $website['ip'], false, $website['subdomains'], '' ];
+                            $params = array_merge($params, $website['website_apps']);
+                            $params[] = [ WEBFACTION_ACME_APPLICATION, ACME_HTTP_VALIDATION_PATH ];
+
+                            call_user_func_array([$webfaction, 'updateWebsite'], $params);
+                        }
+                    } else {
+                        $domainsToValidate[] = $domain;
+                    }
+
+                    $url = sprintf('http://%s%s/%s', $domain, ACME_HTTP_VALIDATION_PATH, $authorization->token);
+
+                    $curl = curl_init($url);
+                    curl_setopt($curl, CURLOPT_HEADER, true);
+                    curl_setopt($curl, CURLOPT_NOBODY, true);
+                    curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+                    curl_exec($curl);
+
+                    $httpStatus = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+
+                    curl_close($curl);
+
+                    if (!in_array($httpStatus, [200, 301])) {
+                        throw new Exception(sprintf("HTTP request not yet available (%s)", $url));
+                    }
                 }
 
-                exec(sprintf('php %s/acmephp.phar check --solver=dns --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $domain), $output, $outcome);
+                exec(sprintf('php %s/acmephp.phar check --solver=%s --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $siteConfig['validation'], $domain), $output, $outcome);
 
                 if ($outcome !== 0) {
                     throw new Exception("Authorization could not been completed");
@@ -149,6 +262,8 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
                 $unverifiedDomains[] = $domain;
             }
         }
+
+        $pendingDomains = array_merge($pendingDomains, $unverifiedDomains);
 
         if (!empty($unverifiedDomains)) {
             throw new Exception("Not all domains could be verified/authorized");
@@ -180,19 +295,16 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
             $webfaction->updateCertificate($siteName, $certificatePem, $keyPem, $intermediatePem);
         }
 
-        foreach ($siteConfig['domains'] as $domain) {
-            $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
-
-            if (array_key_exists($challengeDomain, $configuredDomains)) {
-                printf("  > Removing authorization domain for '%s'...\n", $domain);
-                $webfaction->deleteDomain($configuredDomains[$domain]['parent'], [$configuredDomains[$domain]['path']]);
-            }
-        }
-
         printf("  > Certificate created/updated.\n");
 
+        $domainsToValidate = array_diff($domainsToValidate, $siteConfig['domains']);
+
+        $confirmedDomains = array_merge($confirmedDomains, $siteConfig['domains']);
+
         if (!empty($siteConfig['redirect'])) {
-            $redirects[$domain] = $siteConfig['redirect'];
+            foreach ($siteConfig['domains'] as $domain) {
+                $redirects[$domain] = $siteConfig['redirect'];
+            }
         }
     } catch (\Exception $e) {
         printf("  > Skipping site due to error/issue caused by: %s.\n", $e->getMessage());
@@ -202,22 +314,6 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
 printf("Setting up managed redirections...\n");
 
 try {
-    if (empty($redirects)) {
-        throw new Exception("There are no domains to redirect");
-    }
-
-    $ips = array_values(array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
-        return $ip['machine'] == $machineConfig['name'] && !empty($ip['is_main']);
-    }));
-
-    if (empty($ips)) {
-        throw new Exception("Primary machine's IP cannot be determined");
-    }
-
-    $ip = $ips[0]['ip'];
-
-    $allWebsites = $webfaction->listWebsites();
-
     $conflicts = [];
 
     foreach (array_values(array_filter($allWebsites, function($website) use($ip) {
@@ -235,29 +331,7 @@ try {
     }
 
     if (empty($redirects) && !empty($conflicts)) {
-        throw new Exception(sprintf("No domains to redirect to some conflicts with domains %s", implode(', ', $conflicts)));
-    }
-
-    $applications = array_values(array_filter($webfaction->listApps(), function($application) {
-        return $application['name'] == WEBFACTION_ACME_APPLICATION;
-    }));
-
-    if (empty($applications)) {
-        printf("  > Creating gateway application '%s'... \n", WEBFACTION_ACME_APPLICATION);
-        $application = $webfaction->createApp(WEBFACTION_ACME_APPLICATION, 'static_php70');
-    } else {
-        printf("  > Gateway application exists, going on... \n", WEBFACTION_ACME_APPLICATION);
-    }
-
-    $websites = array_values(array_filter($allWebsites, function($website) use($ip) {
-        return $website['ip'] == $ip && $website['name'] == WEBFACTION_ACME_WEBSITE;
-    }));
-
-    if (empty($websites)) {
-        printf("  > Creating gateway website '%s'... \n", WEBFACTION_ACME_APPLICATION);
-        $website = $webfaction->createWebsite(WEBFACTION_ACME_WEBSITE, $ip, false, [], '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
-    } else {
-        printf("  > Gateway website exists, going on... \n", WEBFACTION_ACME_APPLICATION);
+        throw new Exception(sprintf("No domains to redirect due to conflicts with %s", implode(', ', $conflicts)));
     }
 
     $redirectsWithDestinations = array_filter($redirects, function($redirect) { return is_string($redirect); });
@@ -266,39 +340,38 @@ try {
 
     printf("<IfModule mod_rewrite.c>\n");
     printf("    RewriteEngine On\n");
+    printf("    RewriteCond %%{REQUEST_URI} ^/\.well\-known/acme\-challenge/[0-9a-zA-Z_-]+$\n");
+    printf("    RewriteRule ^\.well\-known/acme\-challenge/([0-9a-zA-Z_-]+)$ /$1 [R=301,NC,L]\n");
 
     foreach ($redirectsWithDestinations as $from => $to) {
         printf("    # Map 'http://%s' -> 'https://%s'\n", $from, $to);
         printf("    RewriteCond %%{HTTP_HOST} ^%s$\n", str_replace('.', '\\.', $from));
+        printf("    RewriteCond %%{REQUEST_URI} !^/\.well\-known/acme\-challenge/\n");
         printf("    RewriteRule (.*) https://%s/$1 [R=301,L]\n", $to);
     }
 
     printf("    # Map domains to their secure counterpart\n");
     printf("    RewriteCond %%{HTTP:X-Forwarded-SSL} !on\n");
+    printf("    RewriteCond %%{REQUEST_FILENAME} !-f\n");
+    printf("    RewriteCond %%{REQUEST_URI} !^/\.well\-known/acme\-challenge/\n");
     printf("    RewriteRule ^(.*)$ https://%%{HTTP_HOST}%%{REQUEST_URI} [R=301,L]\n");
     printf("</IfModule>");
 
     $htaccessPath = tempnam(sys_get_temp_dir(), 'htaccess');
 
     file_put_contents($htaccessPath, ob_get_clean());
-    
+
     $domainsToRedirect = array_values(array_unique(array_merge(array_keys($redirects), array_values($redirectsWithDestinations))));
 
-    printf("  > Update website settings for %d domains...\n", count($domainsToRedirect));
+    $domains = array_merge($domainsToValidate, $domainsToRedirect);
 
-    $website = $webfaction->updateWebsite(WEBFACTION_ACME_APPLICATION, $ip, false, $domainsToRedirect, '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
+    printf("  > Update website settings for %d domains...\n", count($domains));
+
+    $website = $webfaction->updateWebsite(WEBFACTION_ACME_APPLICATION, $ip, false, $domains, '', [ WEBFACTION_ACME_APPLICATION, '/' ]);
 
     $allCertificates = $webfaction->listCertificates();
 
     printf("  > Uploading .htaccess file to server... \n", WEBFACTION_ACME_APPLICATION);
-
-    $ftpConnection = ftp_connect($ip);
-
-    $ftpLogin = ftp_login($ftpConnection, $machineConfig['username'], $machineConfig['password']);
-
-    if (!$ftpConnection || !$ftpLogin) {
-        throw new Exception("FTP connection attempt to server failed");
-    }
 
     $htaccessUpload = ftp_put($ftpConnection, sprintf('~/webapps/%s/.htaccess', WEBFACTION_ACME_APPLICATION), $htaccessPath, FTP_ASCII);
 
@@ -308,11 +381,52 @@ try {
 
     @unlink($htaccessPath);
 
-    ftp_close($ftpConnection);
-
     printf("  > Setup completed.\n");
 } catch (Exception $e) {
-    printf("  > Setup aborted because: %s.\n", $e->getMessage());
+    printf("  > Skipping setup because: %s.\n", $e->getMessage());
 }
+
+printf("Cleaning up...\n");
+
+foreach ($confirmedDomains as $domain) {
+    $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
+
+    if (array_key_exists($challengeDomain, $configuredDomains)) {
+        printf("  > Removing authorization domain for '%s'...\n", $domain);
+        $webfaction->deleteDomain($configuredDomains[$domain]['parent'], [$configuredDomains[$domain]['path']]);
+    }
+
+    $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
+    $authorization = json_decode(file_get_contents($authorizationPath));
+
+    $tokenPath = sprintf('~/webapps/%s/%s', WEBFACTION_ACME_APPLICATION, $authorization->token);
+
+    if (ftp_size($ftpConnection, $tokenPath) >= 0) {
+        printf("  > Removing authorization file for '%s'...\n", $domain);
+        ftp_delete($ftpConnection, $tokenPath);
+    }
+}
+
+$websitesWithAcmeApp = array_values(array_filter($webfaction->listWebsites(), function($website) use($ip) {
+    return $website['ip'] == $ip && empty($website['https']) && !empty(array_filter($website['website_apps'], function($app) {
+        return $app[0] == WEBFACTION_ACME_APPLICATION && $app[1] == ACME_HTTP_VALIDATION_PATH;
+    }));
+}));
+
+foreach ($websitesWithAcmeApp as $website) {
+    $pendingDomainsOfWebsite = array_intersect($pendingDomains, $website['subdomains']);
+    if (empty($pendingDomainsOfWebsite)) {
+        printf("  > Getting rid of gateway application for website '%s'...\n", $website['name']);
+
+        $params = [ $website['name'], $website['ip'], false, $website['subdomains'], '' ];
+        $params = array_merge($params, array_filter($website['website_apps'], function($app) {
+            return $app[0] != WEBFACTION_ACME_APPLICATION && $app[1] != ACME_HTTP_VALIDATION_PATH;
+        }));
+
+        call_user_func_array([$webfaction, 'updateWebsite'], $params);
+    }
+}
+
+ftp_close($ftpConnection);
 
 printf("All done!\n");
