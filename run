@@ -155,20 +155,32 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
             printf("  > Processing domain '%s'... \n", $domain);
 
             try {
-                if (empty($siteConfig['validation'])) {
-                    $siteConfig['validation'] = 'dns';
+                $validationMethod = 'http';
+
+                if (!empty($siteConfig['validation'])) {
+                    if (!in_array($siteConfig['validation'], ['dns', 'http'])) {
+                        throw new Exception('Unknown validation method');
+                    }
+
+                    $validationMethod = $siteConfig['validation'];
+                } else {
+                    $records = trim(shell_exec(sprintf('dig -t ns %s +short', $configuredDomains[$domain]['parent'])));
+                    if (preg_match('/ns(\d+)\.webfaction\.com/', $records)) {
+                        $validationMethod = 'dns';
+                    }
                 }
 
-                if (!in_array($siteConfig['validation'], ['dns', 'http'])) {
-                    throw new Exception('Unknown validation method');
-                }
+                printf("  > Authorising domain using DNS validation... \n", [
+                    'dns' => 'DNS',
+                    'http' => 'HTTP'
+                ][$validationMethod]);
 
-                shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=%s', __DIR__, $domain, $siteConfig['validation']));
+                shell_exec(sprintf('php %s/acmephp.phar authorize %s --no-interaction --solver=%s', __DIR__, $domain, $validationMethod));
 
                 $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
                 $authorization = json_decode(file_get_contents($authorizationPath));
 
-                if ($siteConfig['validation'] === 'dns') {
+                if ($validationMethod === 'dns') {
                     $challenge = (new Base64SafeEncoder())->encode(hash('sha256', $authorization->payload, true));
                     $challengeDomain = sprintf('%s.%s', ACME_DNS_VALIDATION_SUBDOMAIN, $domain);
 
@@ -199,7 +211,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
                     }
                 }
 
-                if ($siteConfig['validation'] === 'http') {
+                if ($validationMethod === 'http') {
                     $tokenPath = tempnam(sys_get_temp_dir(), 'token');
 
                     file_put_contents($tokenPath, $authorization->payload);
@@ -252,11 +264,13 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
                     }
                 }
 
-                exec(sprintf('php %s/acmephp.phar check --solver=%s --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $siteConfig['validation'], $domain), $output, $outcome);
+                exec(sprintf('php %s/acmephp.phar check --solver=%s --no-test --no-interaction %s >/dev/null 2>&1', __DIR__, $validationMethod, $domain), $output, $outcome);
 
                 if ($outcome !== 0) {
                     throw new Exception("Authorization could not been completed");
                 }
+
+                printf("  > Domain has been verified/authorised.\n");
             } catch (Exception $e) {
                 printf("  > Issue detected: %s.\n", $e->getMessage());
                 $unverifiedDomains[] = $domain;
