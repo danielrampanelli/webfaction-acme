@@ -20,6 +20,11 @@ use AcmePhp\Core\Http\Base64SafeEncoder;
 use FortyTwoStudio\WebFactionPHP\WebFactionClient;
 use FortyTwoStudio\WebFactionPHP\WebFactionException;
 
+function is_domain_valid($domain) {
+    exec(sprintf('host %s | grep NXDOMAIN', $domain), $output, $outcome);
+    return ($outcome !== 0);
+}
+
 $encoder = new Base64SafeEncoder();
 
 $config = include(__DIR__.'/config.php');
@@ -127,12 +132,20 @@ $redirects = [];
 foreach ($config['sites'] as $siteName => $siteConfig) {
     printf("Processing site '%s'...\n", $siteName);
 
+    $siteConfig['domains'] = array_values(array_filter($siteConfig['domains'], function($domain) {
+        return is_domain_valid($domain);
+    }));
+
     if (empty($siteConfig['domains'])) {
         throw new Exception("No domains configured");
     }
 
     if (empty($siteConfig['domain'])) {
         $siteConfig['domain'] = $siteConfig['domains'][0];
+    }
+
+    if (!is_domain_valid($siteConfig['domain'])) {
+        throw new Exception(sprintf("Domain '%s' does not seem to be valid", $siteConfig['domain']));
     }
 
     try {
