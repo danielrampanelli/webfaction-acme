@@ -217,7 +217,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
 
                     $webfaction->createDnsOverride($challengeDomain, '', '', '', '', $challenge);
 
-                    $records = trim(shell_exec(sprintf('dig -t TXT %s +short', $challengeDomain)));
+                    $records = trim(shell_exec(sprintf('dig -t txt %s +short', $challengeDomain)));
 
                     if (strpos($records, $challenge) === false) {
                         throw new Exception("DNS records not yet propagated");
