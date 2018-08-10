@@ -170,7 +170,7 @@ foreach ($config['sites'] as $siteName => $siteConfig) {
                     }
                 }
 
-                printf("  > Authorising domain using DNS validation... \n", [
+                printf("  > Authorising domain using %s validation... \n", [
                     'dns' => 'DNS',
                     'http' => 'HTTP'
                 ][$validationMethod]);
