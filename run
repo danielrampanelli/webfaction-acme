@@ -440,7 +440,7 @@ foreach ($confirmedDomains as $domain) {
 
     if (array_key_exists($challengeDomain, $configuredDomains)) {
         printf("  > Removing authorization domain for '%s'...\n", $domain);
-        $webfaction->deleteDomain($configuredDomains[$domain]['parent'], [$configuredDomains[$domain]['path']]);
+        $webfaction->deleteDomain($configuredDomains[$challengeDomain]['parent'], [$configuredDomains[$challengeDomain]['path']]);
     }
 
     $authorizationPath = sprintf('%s/.acmephp/master/private/%s/authorization_challenge.json', $_SERVER['HOME'], $domain);
