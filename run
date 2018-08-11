@@ -25,6 +25,20 @@ function is_domain_valid($domain) {
     return ($outcome !== 0);
 }
 
+function is_domain_handled_by_webfaction($domain, $ips) {
+    exec(sprintf('dig +short %s', $domain), $output);
+
+    $output = implode(' ', $output);
+
+    foreach ($ips as $ip) {
+        if (strpos($output, $ip) !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 $encoder = new Base64SafeEncoder();
 
 $config = include(__DIR__.'/config.php');
@@ -55,16 +69,22 @@ $allWebsites = $webfaction->listWebsites();
 
 printf("Setting up preconditions...\n");
 
+$ips = array_values(array_map(function($ip) use($machineConfig) {
+    return $ip['ip'];
+}, array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
+    return $ip['machine'] == $machineConfig['name'];
+})));
+
 try {
-    $ips = array_values(array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
+    $mainIps = array_values(array_filter($webfaction->listIps(), function($ip) use($machineConfig) {
         return $ip['machine'] == $machineConfig['name'] && !empty($ip['is_main']);
     }));
 
-    if (empty($ips)) {
+    if (empty($mainIps)) {
         throw new Exception("Primary machine's IP cannot be determined");
     }
 
-    $ip = $ips[0]['ip'];
+    $ip = $mainIps[0]['ip'];
 
     $applications = array_values(array_filter($webfaction->listApps(), function($application) {
         return $application['name'] == WEBFACTION_ACME_APPLICATION;
@@ -132,20 +152,20 @@ $redirects = [];
 foreach ($config['sites'] as $siteName => $siteConfig) {
     printf("Processing site '%s'...\n", $siteName);
 
-    $siteConfig['domains'] = array_values(array_filter($siteConfig['domains'], function($domain) {
-        return is_domain_valid($domain);
+    $siteConfig['domains'] = array_values(array_filter($siteConfig['domains'], function($domain) use($ips) {
+        return is_domain_valid($domain) && is_domain_handled_by_webfaction($domain, $ips);
     }));
 
     if (empty($siteConfig['domains'])) {
-        throw new Exception("No domains configured");
+        throw new Exception("No valid domains configured");
     }
 
     if (empty($siteConfig['domain'])) {
         $siteConfig['domain'] = $siteConfig['domains'][0];
     }
 
-    if (!is_domain_valid($siteConfig['domain'])) {
-        throw new Exception(sprintf("Domain '%s' does not seem to be valid", $siteConfig['domain']));
+    if (!is_domain_valid($siteConfig['domain']) || !is_domain_handled_by_webfaction($siteConfig['domain'], $ips)) {
+        throw new Exception(sprintf("Domain '%s' does not seem to be valid or handled by Webfaction", $siteConfig['domain']));
     }
 
     try {
